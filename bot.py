@@ -1,7 +1,9 @@
 """
-Discord Auto-Translate Bot (Anh -> Việt, dịch mọi thứ dịch được từ BOT khác)
+Discord Auto-Translate Bot (Anh -> Việt) - Phiên bản Hoàn Chỉnh
 ------------------------------------------------------------------------------
-- Đã vá lỗi lặp tin nhắn 2 lần bằng Bộ nhớ đệm (Cache) và chặn Webhook tuyệt đối.
+- Chống lặp tin nhắn 100% (Cache + Webhook Blocker).
+- Mở rộng từ điển dịch thuật cho Anime/Gacha/Visual Novel.
+- Tích hợp Trạng thái hoạt động (Rich Presence).
 """
 
 import os
@@ -21,12 +23,11 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_IDS_RAW = os.getenv("TRANSLATE_CHANNEL_IDS", "").strip()
 
-# Bộ nhớ tạm quản lý kênh dịch
 DEFAULT_CHANNELS = {int(x) for x in CHANNEL_IDS_RAW.split(",") if x.strip()} if CHANNEL_IDS_RAW else set()
 TRANSLATE_ALL_BY_DEFAULT = len(DEFAULT_CHANNELS) == 0
 ACTIVE_CHANNELS = DEFAULT_CHANNELS.copy()
 
-# BỘ NHỚ CHỐNG LẶP TIN NHẮN (Ghi nhớ 200 tin nhắn gần nhất để tránh lag nhân đôi của Discord)
+# BỘ NHỚ CHỐNG LẶP (Chỉ lưu tối đa 200 tin nhắn gần nhất)
 _processed_messages = deque(maxlen=200)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -46,8 +47,9 @@ CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:(\w+):(\d+)>")
 BROKEN_EMOJI_PATTERN = re.compile(r":([a-zA-Z_]{2,32}):")
 COMMAND_TOKEN_PATTERN = re.compile(r"\$\w+")
 
-# Từ điển Mudae / Gacha
+# ================= TỪ ĐIỂN DỊCH THUẬT NÂNG CAO =================
 GLOSSARY: list[tuple[re.Pattern, str]] = [
+    # Hệ thống Hạng/Đá quý
     (re.compile(r"\bbronze\b", re.IGNORECASE), "Đồng"),
     (re.compile(r"\bsilver\b", re.IGNORECASE), "Bạc"),
     (re.compile(r"\bgold\b", re.IGNORECASE), "Vàng"),
@@ -55,6 +57,8 @@ GLOSSARY: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bruby\b", re.IGNORECASE), "Ruby"),
     (re.compile(r"\bemerald\b", re.IGNORECASE), "Emerald"),
     (re.compile(r"\bdiamond\b", re.IGNORECASE), "Kim cương"),
+    
+    # Gacha chung / Mudae
     (re.compile(r"\balready\s*claimed\s*rolls?\b", re.IGNORECASE), "các lượt roll đã có chủ"),
     (re.compile(r"\balready\s*claimed\s*characters?\b", re.IGNORECASE), "nhân vật đã có chủ"),
     (re.compile(r"\bwish\s*list\s*slots?\b", re.IGNORECASE), "lượt danh sách yêu thích"),
@@ -79,6 +83,15 @@ GLOSSARY: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bkakera\b", re.IGNORECASE), "kakera"),
     (re.compile(r"\blike\s*rank\b", re.IGNORECASE), "thứ hạng yêu thích"),
     (re.compile(r"\bcharacter\s*claims?\b", re.IGNORECASE), "lượt bắt nhân vật"),
+    (re.compile(r"\bpity\b", re.IGNORECASE), "bảo hiểm (pity)"),
+    
+    # Anime / Visual Novel / Strategy Game Context
+    (re.compile(r"\bsanity\b", re.IGNORECASE), "điểm lý trí (sanity)"),
+    (re.compile(r"\boperator(s)?\b", re.IGNORECASE), "Toán viên"),
+    (re.compile(r"\btrainer(s)?\b", re.IGNORECASE), "Huấn luyện viên"),
+    (re.compile(r"\borundum\b", re.IGNORECASE), "Đá đỏ (Orundum)"),
+    (re.compile(r"\broute(s)?\b", re.IGNORECASE), "tuyến truyện (route)"),
+    (re.compile(r"\bcanon\b", re.IGNORECASE), "chính thức (canon)"),
 ]
 
 _TIER_BASES = ("bronze", "silver", "gold", "sapphire", "ruby", "emerald", "diamond", "amethyst", "topaz")
@@ -365,7 +378,7 @@ async def get_or_create_webhook(channel: discord.TextChannel) -> discord.Webhook
     _webhook_cache[channel.id] = wh
     return wh
 
-# ================= LỆNH BẬT / TẮT DỊCH CHO NGƯỜI DÙNG =================
+# ================= LỆNH NGƯỜI DÙNG =================
 @bot.command(name="toggledich")
 async def toggle_dich(ctx: commands.Context):
     """Bật hoặc tắt chức năng tự động dịch tại kênh hiện tại."""
@@ -386,44 +399,42 @@ async def toggle_dich(ctx: commands.Context):
             status = "🟢 **BẬT**"
     await ctx.send(f"{status} tự động dịch cho kênh này!", delete_after=10)
 
-
 # ================= SỰ KIỆN CHÍNH =================
 @bot.event
 async def on_ready():
+    # Thêm Rich Presence cho sinh động
+    activity = discord.Activity(type=discord.ActivityType.watching, name="tất cả các kênh chat | !toggledich")
+    await bot.change_presence(status=discord.Status.online, activity=activity)
+    
     log.info(f"Đã đăng nhập: {bot.user} (ID: {bot.user.id})")
-    log.info("Bot dịch tự động đã sẵn sàng hoạt động với chống lặp 100%.")
+    log.info("Hệ thống dịch hoàn thiện, tính năng chống lặp đã kích hoạt 100%.")
 
 @bot.event
 async def on_message(message: discord.Message):
-    # 1. BỘ NHỚ ĐỆM CHỐNG LẶP: Nếu ID tin nhắn này đã từng xử lý, bỏ qua ngay!
+    # CHỐT 1: Chống lặp tin nhắn Cache
     if message.id in _processed_messages:
         return
     _processed_messages.append(message.id)
 
-    # 2. Xử lý lệnh của bot (nếu có)
     await bot.process_commands(message)
 
-    # 3. Bỏ qua các tin nhắn không nằm trong Server (DMs)
     if message.guild is None:
         return
         
-    # 4. Chỉ xử lý trong kênh Text hoặc Thread
     if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
         return
 
-    # 5. CHẶN TUYỆT ĐỐI TẤT CẢ WEBHOOKS: Tránh hoàn toàn việc bot tự dịch lại tin nhắn của chính nó
+    # CHỐT 2: Chặn webhook
     if message.webhook_id is not None:
         return
 
-    # 6. CHỈ dịch tin nhắn của các BOT khác (bỏ qua hoàn toàn người dùng thật)
+    # CHỈ dịch tin từ Bot
     if not message.author.bot:
         return
 
-    # 7. Kiểm tra xem kênh này có đang kích hoạt dịch hay không
     if not is_channel_translation_active(message.channel.id):
         return
 
-    # 8. Bỏ qua các tin nhắn bắt đầu bằng ký tự lệnh
     if is_command_message(message.content):
         return
 
@@ -440,7 +451,7 @@ async def on_message(message: discord.Message):
         if changed:
             embeds_changed = True
 
-    # --- BỘ LỌC CHỐNG NHÂN ĐÔI EMBED BÊN TRONG CÙNG 1 TIN NHẮN ---
+    # Lọc chống nhân đôi Embed
     unique_embeds: list[discord.Embed] = []
     seen_embeds = set()
     for emb in new_embeds:
