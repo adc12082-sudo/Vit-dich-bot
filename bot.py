@@ -48,9 +48,8 @@ CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:(\w+):(\d+)>")
 BROKEN_EMOJI_PATTERN = re.compile(r":([a-zA-Z_]{2,32}):")
 COMMAND_TOKEN_PATTERN = re.compile(r"\$\w+")
 
-# Từ điển thuật ngữ tối ưu cho game Gacha/Anime (Đã sửa lỗi dịch dính chữ và tối ưu hóa các Tier)
+# Từ điển thuật ngữ tối ưu cho game Gacha/Anime
 GLOSSARY: list[tuple[re.Pattern, str]] = [
-    # Dịch cứng tên các Tier để đảm bảo tính đồng nhất (Chống lỗi sót "Diamond")
     (re.compile(r"\bbronze\b", re.IGNORECASE), "Đồng"),
     (re.compile(r"\bsilver\b", re.IGNORECASE), "Bạc"),
     (re.compile(r"\bgold\b", re.IGNORECASE), "Vàng"),
@@ -58,8 +57,6 @@ GLOSSARY: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bruby\b", re.IGNORECASE), "Ruby"),
     (re.compile(r"\bemerald\b", re.IGNORECASE), "Emerald"),
     (re.compile(r"\bdiamond\b", re.IGNORECASE), "Kim cương"),
-
-    # Các thuật ngữ Mudae thông dụng khác
     (re.compile(r"\balready\s*claimed\s*rolls?\b", re.IGNORECASE), "các lượt roll đã có chủ"),
     (re.compile(r"\balready\s*claimed\s*characters?\b", re.IGNORECASE), "nhân vật đã có chủ"),
     (re.compile(r"\bwish\s*list\s*slots?\b", re.IGNORECASE), "lượt danh sách yêu thích"),
@@ -99,16 +96,11 @@ def _format_emoji_label(name: str) -> str:
     return name.capitalize()
 
 def _bold_emoji_name(name: str, text: str, start: int, match_len: int) -> str:
-    # Thêm khoảng trắng phía trước nếu ký tự trước đó không phải khoảng trắng hoặc xuống dòng
     prefix = " " if start > 0 and text[start - 1] not in (" ", "\n") else ""
-    
-    # SỬA LỖI DÍNH LIỀN: Tự động thêm khoảng trắng phía sau nếu ký tự kế tiếp là chữ/số
     end_idx = start + match_len
     suffix = " " if end_idx < len(text) and text[end_idx].isalnum() else ""
-    
     return f"{prefix}**{_format_emoji_label(name)}**{suffix}"
 
-# Regex chống lặp nâng cao (Bao quát cả trường hợp lặp in đậm: **Bronze III** **Bronze III**)
 _DEDUP_EMOJI_LABEL_PATTERN = re.compile(r"\*\*([^*\n]{2,40})\*\*(\s+)(?:\*\*)?\1(?:\*\*)?(?!\w)", re.IGNORECASE)
 
 def _stylize_broken_emoji(text: str) -> str:
@@ -246,13 +238,10 @@ def _restore_tokens(text: str, placeholders: dict[str, str]) -> tuple[str, bool]
         text = text.replace(key, original)
     return text, ok
 
-# SỬA LỖI DÍNH CHỮ: Tự động khôi phục khoảng trắng xung quanh các ký tự in đậm ** bị Google xóa mất
 def _fix_markdown_spaces(text: str) -> str:
     if not text:
         return text
-    # Thêm khoảng trắng TRƯỚC ** nếu nó bị dính trực tiếp vào chữ/số (Bỏ qua nếu sát các dấu mở ngoặc)
     text = re.sub(r'([^\s(\[{\'"])\s*(\*\*[^*]+\*\*)', r'\1 \2', text)
-    # Thêm khoảng trắng SAU ** nếu nó bị dính trực tiếp vào chữ/số (Bỏ qua nếu sát dấu ngắt câu như dấu chấm, phẩy...)
     text = re.sub(r'(\*\*[^*]+\*\*)\s*([^\s.,!?:;\])}\'"])', r'\1 \2', text)
     return text
 
@@ -410,8 +399,6 @@ async def toggle_dich(ctx: commands.Context):
 @bot.event
 async def on_ready():
     log.info(f"Đã đăng nhập: {bot.user} (ID: {bot.user.id})")
-    
-    # QUÉT TOÀN BỘ WEBHOOK KHI KHỞI ĐỘNG: Tránh tuyệt đối việc phản hồi vòng lặp hoặc dịch nhầm chính mình
     log.info("Đang quét và đồng bộ danh sách Webhook của bot...")
     count = 0
     for guild in bot.guilds:
@@ -432,7 +419,7 @@ async def on_ready():
 
 @bot.event
 async def on_message(message: discord.Message):
-    # 1. Chạy lệnh từ người dùng thực (Chỉ chạy một lần duy nhất)
+    # 1. Chạy lệnh từ người dùng thực (Chỉ chạy một lần duy nhất ở đây)
     await bot.process_commands(message)
 
     # 2. Bỏ qua các tin nhắn không nằm trong Server (DMs)
@@ -472,18 +459,17 @@ async def on_message(message: discord.Message):
         if changed:
             embeds_changed = True
 
-    # --- BỘ LỌC CHỐNG NHÂN ĐÔI EMBED (Bản vá lỗi lặp 2 bảng trùng nhau) ---
+    # --- BỘ LỌC CHỐNG NHÂN ĐÔI EMBED ---
     unique_embeds: list[discord.Embed] = []
     seen_embeds = set()
     for emb in new_embeds:
         e_dict = emb.to_dict()
-        # Ép chuỗi json để so sánh nội dung 2 bảng xem có giống hệt nhau không
         e_str = json.dumps(e_dict, sort_keys=True)
         if e_str not in seen_embeds:
             seen_embeds.add(e_str)
             unique_embeds.append(emb)
     new_embeds = unique_embeds
-    # ---------------------------------------------------------------------
+    # ----------------------------------
 
     if not content_changed and not embeds_changed:
         return  
@@ -518,4 +504,29 @@ async def on_message(message: discord.Message):
         kwargs = dict(username=display_name, avatar_url=avatar_url)
         if final_content:
             kwargs["content"] = final_content
-        if new_
+        if new_embeds:
+            kwargs["embeds"] = new_embeds
+        if files:
+            kwargs["files"] = files
+
+        if isinstance(message.channel, discord.Thread):
+            await webhook.send(thread=message.channel, **kwargs)
+        else:
+            await webhook.send(**kwargs)
+
+        try:
+            # Thêm độ trễ cực nhỏ để đảm bảo không xung đột tiến trình Discord
+            await asyncio.sleep(0.5)
+            await message.delete()
+        except discord.NotFound:
+            pass
+
+    except discord.Forbidden:
+        log.error("Thiếu quyền! Cần cấp Manage Messages + Manage Webhooks cho bot trong kênh này.")
+    except discord.HTTPException as e:
+        log.error(f"Lỗi Discord API: {e}")
+
+if __name__ == "__main__":
+    if not TOKEN:
+        raise SystemExit("Chưa có DISCORD_TOKEN trong file .env")
+    bot.run(TOKEN)
