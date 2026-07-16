@@ -1,16 +1,21 @@
 """
 Discord Auto-Translate Bot (Anh -> Việt, dịch mọi thứ dịch được từ BOT khác)
 ------------------------------------------------------------------------------
-- Dịch TẤT CẢ nội dung tiếng Anh dịch được từ BOT KHÁC (vd. Mudae) sang tiếng Việt
-- Có bộ lọc chống lỗi lặp chữ và chống lặp 2 bảng embed giống nhau.
-- Tích hợp lệnh !toggledich để bật/tắt nhanh cơ chế dịch tại kênh bất kỳ.
+- Dịch TẤT CẢ nội dung tiếng Anh dịch được từ BOT KHÁC (vd. Mudae) sang tiếng Việt:
+    + Tin nhắn chữ thường
+    + Cả nội dung bên trong khung ảnh (embed): tiêu đề, mô tả, từng field, footer, author
+- KHÔNG đụng vào tin nhắn của người dùng thật (bỏ qua hoàn toàn)
+- KHÔNG dịch, KHÔNG xóa bất kỳ "tin nhắn lệnh" nào
+- KHÔNG dịch tên lệnh dạng "$tenlenh" dù nó nằm LẪN TRONG một câu mô tả dài
+- Giữ nguyên ảnh/màu sắc/link trong embed, chỉ thay phần chữ
+- Xóa tin nhắn gốc, gửi lại bản dịch qua Webhook giả danh đúng tên + avatar
+- Áp dụng cho TOÀN SERVER theo mặc định (mọi kênh text)
 """
 
 import os
 import re
 import asyncio
 import logging
-import json
 
 import discord
 from discord.ext import commands
@@ -21,11 +26,11 @@ load_dotenv()
 
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_IDS_RAW = os.getenv("TRANSLATE_CHANNEL_IDS", "").strip()
-
-DEFAULT_CHANNELS = {int(x) for x in CHANNEL_IDS_RAW.split(",") if x.strip()} if CHANNEL_IDS_RAW else set()
-TRANSLATE_ALL_BY_DEFAULT = len(DEFAULT_CHANNELS) == 0
-
-ACTIVE_CHANNELS = DEFAULT_CHANNELS.copy()
+TRANSLATE_CHANNEL_IDS = (
+    {int(x) for x in CHANNEL_IDS_RAW.split(",") if x.strip()}
+    if CHANNEL_IDS_RAW
+    else None
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("translate-bot")
@@ -45,20 +50,15 @@ CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:(\w+):(\d+)>")
 BROKEN_EMOJI_PATTERN = re.compile(r":([a-zA-Z_]{2,32}):")
 COMMAND_TOKEN_PATTERN = re.compile(r"\$\w+")
 
-# Từ điển thuật ngữ tối ưu cho game Gacha/Anime (Đã được nâng cấp để dịch mượt hơn)
+# [ĐÃ SỬA] Cập nhật Glossary để cụm "wish list slot" dịch xuôi tai hơn
 GLOSSARY: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"\balready\s*claimed\s*characters?\b", re.IGNORECASE), "nhân vật đã có chủ"),
-    (re.compile(r"\bwish\s*list\s*rolls?\b", re.IGNORECASE), "lượt roll wishlist"),
-    (re.compile(r"wishlist\s*rolls?", re.IGNORECASE), "lượt roll wishlist"),
-    (re.compile(r"wishlist\s*spawn\s*rate", re.IGNORECASE), "tỷ lệ xuất hiện wishlist"),
-    (re.compile(r"kakera\s*power\s*consumption", re.IGNORECASE), "mức tiêu thụ năng lượng kakera"),
-    (re.compile(r"\bpower\s*badges?\b", re.IGNORECASE), "huy hiệu sức mạnh"),
     (re.compile(r"\bcharacters?\b", re.IGNORECASE), "nhân vật"),
     (re.compile(r"\brolls?\b", re.IGNORECASE), "roll"),
     (re.compile(r"\brolled\b", re.IGNORECASE), "roll"),
     (re.compile(r"\brolling\b", re.IGNORECASE), "roll"),
     (re.compile(r"\bclaims?\b", re.IGNORECASE), "bắt"),
     (re.compile(r"\bclaimed\b", re.IGNORECASE), "bắt"),
+    (re.compile(r"\bwish\s*list\s*slots?\b", re.IGNORECASE), "lượt danh sách yêu thích"), # Ưu tiên match cụm dài trước
     (re.compile(r"\bwish\s*list(s)?\b", re.IGNORECASE), "danh sách yêu thích"),
     (re.compile(r"\bharem\b", re.IGNORECASE), "harem"),
     (re.compile(r"\bkeys?\b", re.IGNORECASE), "chìa khóa"),
@@ -85,32 +85,27 @@ def _bold_emoji_name(name: str, text: str, start: int) -> str:
     prefix = " " if start > 0 and text[start - 1] not in (" ", "\n") else ""
     return f"{prefix}**{_format_emoji_label(name)}**"
 
+# [ĐÃ SỬA] Nâng cấp regex chống lặp: Bắt cả trường hợp vế sau bị bọc ** (vd: **Bronze III** **Bronze III**)
 _DEDUP_EMOJI_LABEL_PATTERN = re.compile(r"\*\*([^*\n]{2,40})\*\*(\s+)(?:\*\*)?\1(?:\*\*)?(?!\w)", re.IGNORECASE)
 
 def _stylize_broken_emoji(text: str) -> str:
     if not text:
         return text
-    text = CUSTOM_EMOJI_PATTERN.sub(
-        lambda m: _bold_emoji_name(m.group(1), text, m.start()), text
-    )
-    text = BROKEN_EMOJI_PATTERN.sub(
-        lambda m: _bold_emoji_name(m.group(1), text, m.start()), text
-    )
+    text = CUSTOM_EMOJI_PATTERN.sub(lambda m: _bold_emoji_name(m.group(1), text, m.start()), text)
+    text = BROKEN_EMOJI_PATTERN.sub(lambda m: _bold_emoji_name(m.group(1), text, m.start()), text)
     text = _DEDUP_EMOJI_LABEL_PATTERN.sub(lambda m: f"**{m.group(1)}**", text)
     return text
 
 COMMAND_PREFIXES = "$!.~->?/+*;%^&=:"
 VIETNAMESE_CHARS = re.compile(
     "[àáạảãâầấậẩẫăằắặẳẵèéẹẻẽêềếệểễìíịỉĩòóọỏõôồốộổỗơờớợởỡ"
-    "ùúụủũưừứựửữỳýỵỷỹđ]",
-    re.IGNORECASE,
+    "ùúụủũưừứựửữỳýỵỷỹđ]", re.IGNORECASE,
 )
 
-def is_channel_translation_active(channel_id: int) -> bool:
-    if TRANSLATE_ALL_BY_DEFAULT:
-        return channel_id not in ACTIVE_CHANNELS
-    else:
-        return channel_id in ACTIVE_CHANNELS
+def should_process_channel(channel_id: int) -> bool:
+    if TRANSLATE_CHANNEL_IDS is None:
+        return True
+    return channel_id in TRANSLATE_CHANNEL_IDS
 
 def is_command_message(content: str) -> bool:
     text = content.strip()
@@ -222,6 +217,16 @@ def _restore_tokens(text: str, placeholders: dict[str, str]) -> tuple[str, bool]
         text = text.replace(key, original)
     return text, ok
 
+# [MỚI] Hàm sửa lỗi Google Translate nuốt khoảng trắng quanh ký tự in đậm
+def _fix_markdown_spaces(text: str) -> str:
+    if not text:
+        return text
+    # Thêm khoảng trắng TRƯỚC ** nếu nó bị dính trực tiếp vào chữ/số (Bỏ qua nếu sát các dấu mở ngoặc)
+    text = re.sub(r'([^\s(\[{\'"])\s*(\*\*[^*]+\*\*)', r'\1 \2', text)
+    # Thêm khoảng trắng SAU ** nếu nó bị dính trực tiếp vào chữ/số (Bỏ qua nếu sát dấu ngắt câu như dấu chấm, phẩy...)
+    text = re.sub(r'(\*\*[^*]+\*\*)\s*([^\s.,!?:;\])}\'"])', r'\1 \2', text)
+    return text
+
 async def process_text(text: str) -> tuple[str, bool]:
     if not text:
         return text, False
@@ -235,16 +240,19 @@ async def process_text(text: str) -> tuple[str, bool]:
             try:
                 translated = await _translate_raw(working)
             except Exception as e:
-                log.warning(f"Dịch lỗi (lần {attempt + 1}/3): {e}")
+                log.warning(f"Dịch lỗi (lần {attempt + 1}/3), giữ nguyên đoạn gốc: {e}")
                 break
             if translated.strip().lower() == working.strip().lower():
                 break
             restored, ok = _restore_tokens(translated, placeholders)
             if ok:
-                return restored, restored != text
+                # Áp dụng sửa khoảng trắng trước khi trả về kết quả
+                final = _fix_markdown_spaces(restored)
+                return final, final != text
             log.warning(f"Khôi phục token sau dịch thất bại (lần {attempt + 1}/3), thử lại.")
 
     final, _ok = _restore_tokens(working, placeholders)
+    final = _fix_markdown_spaces(final)
     return final, final != text
 
 _BATCH_SEP = "$zqxsepqxz"
@@ -262,17 +270,20 @@ async def _translate_batch(texts: list[str]) -> tuple[list[str] | None, bool]:
         try:
             translated = await _translate_raw(working)
         except Exception as e:
+            log.warning(f"Dịch gộp lỗi (lần {attempt + 1}/3): {e}")
             continue
         restored, ok = _restore_tokens(translated, placeholders)
         parts = restored.split(_BATCH_SEP)
         if ok and len(parts) == len(texts):
-            return parts, True
+            # Sửa khoảng trắng cho toàn bộ batch
+            return [_fix_markdown_spaces(p) for p in parts], True
+        log.warning(f"Khôi phục token dịch gộp thất bại (lần {attempt + 1}/3), thử lại.")
 
     restored, _ok = _restore_tokens(working, placeholders)
     parts = restored.split(_BATCH_SEP)
     if len(parts) != len(texts):
         return None, False
-    return parts, False
+    return [_fix_markdown_spaces(p) for p in parts], False
 
 async def translate_embed(embed: discord.Embed) -> tuple[discord.Embed, bool]:
     changed = False
@@ -311,6 +322,7 @@ async def translate_embed(embed: discord.Embed) -> tuple[discord.Embed, bool]:
     if batch_texts:
         parts, translated_ok = await _translate_batch(batch_texts)
         if parts is None:
+            log.warning("Tách kết quả dịch gộp bị lệch, chuyển sang dịch từng phần riêng lẻ.")
             for idx in batch_idx:
                 r, did_change = await process_text(slots[idx][2])
                 results[idx] = r
@@ -330,44 +342,21 @@ async def translate_embed(embed: discord.Embed) -> tuple[discord.Embed, bool]:
 async def get_or_create_webhook(channel: discord.TextChannel) -> discord.Webhook:
     if channel.id in _webhook_cache:
         return _webhook_cache[channel.id]
-
     webhooks = await channel.webhooks()
     for wh in webhooks:
         if wh.name == "auto-translate-relay" and wh.user and wh.user.id == bot.user.id:
             _webhook_cache[channel.id] = wh
             _own_webhook_ids.add(wh.id)
             return wh
-
     wh = await channel.create_webhook(name="auto-translate-relay")
     _webhook_cache[channel.id] = wh
     _own_webhook_ids.add(wh.id)
     return wh
 
-@bot.command(name="toggledich")
-async def toggle_dich(ctx: commands.Context):
-    """Bật hoặc tắt chức năng tự động dịch tại kênh hiện tại."""
-    channel_id = ctx.channel.id
-    
-    if TRANSLATE_ALL_BY_DEFAULT:
-        if channel_id in ACTIVE_CHANNELS:
-            ACTIVE_CHANNELS.remove(channel_id)
-            status = "🟢 **BẬT**"
-        else:
-            ACTIVE_CHANNELS.add(channel_id)
-            status = "🔴 **TẮT**"
-    else:
-        if channel_id in ACTIVE_CHANNELS:
-            ACTIVE_CHANNELS.remove(channel_id)
-            status = "🔴 **TẮT**"
-        else:
-            ACTIVE_CHANNELS.add(channel_id)
-            status = "🟢 **BẬT**"
-            
-    await ctx.send(f"{status} tự động dịch cho kênh này!", delete_after=10)
-
 @bot.event
 async def on_ready():
     log.info(f"Đã đăng nhập: {bot.user} (ID: {bot.user.id})")
+    log.info("Bot đã sẵn sàng dịch tự động.")
 
 @bot.event
 async def on_message(message: discord.Message):
@@ -375,23 +364,20 @@ async def on_message(message: discord.Message):
         return
     if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
         return
-
-    await bot.process_commands(message)
-
+    if not should_process_channel(message.channel.id):
+        return
     if message.webhook_id is not None and message.webhook_id in _own_webhook_ids:
         return
-
     if not message.author.bot:
+        await bot.process_commands(message)
         return
-
-    if not is_channel_translation_active(message.channel.id):
-        return
-
     if is_command_message(message.content):
         return
 
+    has_components = bool(getattr(message, "components", None))
     final_content = message.content
     content_changed = False
+    
     if message.content and message.content.strip():
         final_content, content_changed = await process_text(message.content)
 
@@ -403,24 +389,8 @@ async def on_message(message: discord.Message):
         if changed:
             embeds_changed = True
 
-    # --- BỘ LỌC CHỐNG NHÂN ĐÔI EMBED (Mới thêm) ---
-    unique_embeds: list[discord.Embed] = []
-    seen_embeds = set()
-    for emb in new_embeds:
-        e_dict = emb.to_dict()
-        # Ép chuỗi json để so sánh nội dung 2 bảng xem có giống hệt nhau không
-        e_str = json.dumps(e_dict, sort_keys=True)
-        if e_str not in seen_embeds:
-            seen_embeds.add(e_str)
-            unique_embeds.append(emb)
-    
-    new_embeds = unique_embeds
-    # ----------------------------------------------
-
     if not content_changed and not embeds_changed:
-        return  
-
-    has_components = bool(getattr(message, "components", None))
+        return
 
     try:
         webhook = await get_or_create_webhook(message.channel)
@@ -431,14 +401,28 @@ async def on_message(message: discord.Message):
         if message.attachments and not has_components:
             try:
                 files = [await a.to_file() for a in message.attachments]
-            except (discord.HTTPException, discord.NotFound):
-                pass
+            except (discord.HTTPException, discord.NotFound) as e:
+                log.warning(f"Không tải lại được file đính kèm: {e}")
+
+        if has_components:
+            note = "*(Bản dịch — bấm nút ở tin nhắn gốc phía trên nhé)*"
+            final_content = f"{final_content}\n{note}" if final_content else note
+            kwargs = dict(username=display_name, avatar_url=avatar_url, content=final_content)
+            if new_embeds:
+                kwargs["embeds"] = new_embeds
+            if isinstance(message.channel, discord.Thread):
+                await webhook.send(thread=message.channel, **kwargs)
+            else:
+                await webhook.send(**kwargs)
+            await bot.process_commands(message)
+            return
 
         kwargs = dict(username=display_name, avatar_url=avatar_url)
-        if final_content: kwargs["content"] = final_content
-        if new_embeds: kwargs["embeds"] = new_embeds
-
-        if not has_components and files:
+        if final_content:
+            kwargs["content"] = final_content
+        if new_embeds:
+            kwargs["embeds"] = new_embeds
+        if files:
             kwargs["files"] = files
 
         if isinstance(message.channel, discord.Thread):
@@ -452,12 +436,14 @@ async def on_message(message: discord.Message):
             pass
 
     except discord.Forbidden:
-        pass
-    except discord.HTTPException:
-        pass
+        log.error("Thiếu quyền! Cần cấp Manage Messages + Manage Webhooks cho bot trong kênh này.")
+    except discord.HTTPException as e:
+        log.error(f"Lỗi Discord API: {e}")
+
+    await bot.process_commands(message)
 
 if __name__ == "__main__":
     if not TOKEN:
         raise SystemExit("Chưa có DISCORD_TOKEN trong file .env")
     bot.run(TOKEN)
-        
+                 
