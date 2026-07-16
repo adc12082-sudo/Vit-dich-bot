@@ -1,10 +1,7 @@
 """
 Discord Auto-Translate Bot (Anh -> Việt, dịch mọi thứ dịch được từ BOT khác)
 ------------------------------------------------------------------------------
-- Dịch TẤT CẢ nội dung tiếng Anh dịch được từ BOT KHÁC (vd. Mudae) sang tiếng Việt
-- Giữ nguyên tên bot gốc, avatar gốc, hình ảnh, file đính kèm, màu sắc embed.
-- Tích hợp lệnh !toggledich để bật/tắt nhanh cơ chế dịch tại kênh bất kỳ.
-- Tích hợp bộ lọc chống trùng lặp, chống dính chữ và tự động chuẩn hóa khoảng trắng.
+- Đã vá lỗi lặp tin nhắn 2 lần bằng Bộ nhớ đệm (Cache) và chặn Webhook tuyệt đối.
 """
 
 import os
@@ -12,6 +9,7 @@ import re
 import asyncio
 import logging
 import json
+from collections import deque
 
 import discord
 from discord.ext import commands
@@ -23,12 +21,13 @@ load_dotenv()
 TOKEN = os.getenv("DISCORD_TOKEN")
 CHANNEL_IDS_RAW = os.getenv("TRANSLATE_CHANNEL_IDS", "").strip()
 
-# Bộ nhớ tạm để quản lý việc bật/tắt dịch tự động tại các kênh chat
+# Bộ nhớ tạm quản lý kênh dịch
 DEFAULT_CHANNELS = {int(x) for x in CHANNEL_IDS_RAW.split(",") if x.strip()} if CHANNEL_IDS_RAW else set()
 TRANSLATE_ALL_BY_DEFAULT = len(DEFAULT_CHANNELS) == 0
-
-# Biến toàn cục để theo dõi trạng thái bật/tắt động trong lúc bot chạy
 ACTIVE_CHANNELS = DEFAULT_CHANNELS.copy()
+
+# BỘ NHỚ CHỐNG LẶP TIN NHẮN (Ghi nhớ 200 tin nhắn gần nhất để tránh lag nhân đôi của Discord)
+_processed_messages = deque(maxlen=200)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
 log = logging.getLogger("translate-bot")
@@ -41,14 +40,13 @@ intents.webhooks = True
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 _webhook_cache: dict[int, discord.Webhook] = {}
-_own_webhook_ids: set[int] = set()
 
 URL_PATTERN = re.compile(r"https?://\S+")
 CUSTOM_EMOJI_PATTERN = re.compile(r"<a?:(\w+):(\d+)>")
 BROKEN_EMOJI_PATTERN = re.compile(r":([a-zA-Z_]{2,32}):")
 COMMAND_TOKEN_PATTERN = re.compile(r"\$\w+")
 
-# Từ điển thuật ngữ tối ưu cho game Gacha/Anime
+# Từ điển Mudae / Gacha
 GLOSSARY: list[tuple[re.Pattern, str]] = [
     (re.compile(r"\bbronze\b", re.IGNORECASE), "Đồng"),
     (re.compile(r"\bsilver\b", re.IGNORECASE), "Bạc"),
@@ -258,7 +256,7 @@ async def process_text(text: str) -> tuple[str, bool]:
             try:
                 translated = await _translate_raw(working)
             except Exception as e:
-                log.warning(f"Dịch lỗi (lần {attempt + 1}/3), giữ nguyên đoạn gốc: {e}")
+                log.warning(f"Dịch lỗi (lần {attempt + 1}/3), giữ nguyên: {e}")
                 break
             if translated.strip().lower() == working.strip().lower():
                 break
@@ -266,7 +264,7 @@ async def process_text(text: str) -> tuple[str, bool]:
             if ok:
                 final = _fix_markdown_spaces(restored)
                 return final, final != text
-            log.warning(f"Khôi phục token sau dịch thất bại (lần {attempt + 1}/3), thử lại.")
+            log.warning(f"Khôi phục token thất bại (lần {attempt + 1}/3).")
 
     final, _ok = _restore_tokens(working, placeholders)
     final = _fix_markdown_spaces(final)
@@ -293,7 +291,6 @@ async def _translate_batch(texts: list[str]) -> tuple[list[str] | None, bool]:
         parts = restored.split(_BATCH_SEP)
         if ok and len(parts) == len(texts):
             return [_fix_markdown_spaces(p) for p in parts], True
-        log.warning(f"Khôi phục token dịch gộp thất bại (lần {attempt + 1}/3), thử lại.")
 
     restored, _ok = _restore_tokens(working, placeholders)
     parts = restored.split(_BATCH_SEP)
@@ -338,7 +335,6 @@ async def translate_embed(embed: discord.Embed) -> tuple[discord.Embed, bool]:
     if batch_texts:
         parts, translated_ok = await _translate_batch(batch_texts)
         if parts is None:
-            log.warning("Tách kết quả dịch gộp bị lệch, chuyển sang dịch từng phần riêng lẻ.")
             for idx in batch_idx:
                 r, did_change = await process_text(slots[idx][2])
                 results[idx] = r
@@ -363,12 +359,10 @@ async def get_or_create_webhook(channel: discord.TextChannel) -> discord.Webhook
     for wh in webhooks:
         if wh.name == "auto-translate-relay" and wh.user and wh.user.id == bot.user.id:
             _webhook_cache[channel.id] = wh
-            _own_webhook_ids.add(wh.id)
             return wh
 
     wh = await channel.create_webhook(name="auto-translate-relay")
     _webhook_cache[channel.id] = wh
-    _own_webhook_ids.add(wh.id)
     return wh
 
 # ================= LỆNH BẬT / TẮT DỊCH CHO NGƯỜI DÙNG =================
@@ -376,7 +370,6 @@ async def get_or_create_webhook(channel: discord.TextChannel) -> discord.Webhook
 async def toggle_dich(ctx: commands.Context):
     """Bật hoặc tắt chức năng tự động dịch tại kênh hiện tại."""
     channel_id = ctx.channel.id
-    
     if TRANSLATE_ALL_BY_DEFAULT:
         if channel_id in ACTIVE_CHANNELS:
             ACTIVE_CHANNELS.remove(channel_id)
@@ -391,7 +384,6 @@ async def toggle_dich(ctx: commands.Context):
         else:
             ACTIVE_CHANNELS.add(channel_id)
             status = "🟢 **BẬT**"
-            
     await ctx.send(f"{status} tự động dịch cho kênh này!", delete_after=10)
 
 
@@ -399,50 +391,39 @@ async def toggle_dich(ctx: commands.Context):
 @bot.event
 async def on_ready():
     log.info(f"Đã đăng nhập: {bot.user} (ID: {bot.user.id})")
-    log.info("Đang quét và đồng bộ danh sách Webhook của bot...")
-    count = 0
-    for guild in bot.guilds:
-        for channel in guild.text_channels:
-            try:
-                webhooks = await channel.webhooks()
-                for wh in webhooks:
-                    if wh.name == "auto-translate-relay" and wh.user and wh.user.id == bot.user.id:
-                        _webhook_cache[channel.id] = wh
-                        _own_webhook_ids.add(wh.id)
-                        count += 1
-            except discord.Forbidden:
-                continue
-            except discord.HTTPException:
-                continue
-    log.info(f"Đã đồng bộ thành công {count} Webhook đang hoạt động.")
-    log.info("Bot dịch tự động đã sẵn sàng hoạt động.")
+    log.info("Bot dịch tự động đã sẵn sàng hoạt động với chống lặp 100%.")
 
 @bot.event
 async def on_message(message: discord.Message):
-    # 1. Chạy lệnh từ người dùng thực (Chỉ chạy một lần duy nhất ở đây)
+    # 1. BỘ NHỚ ĐỆM CHỐNG LẶP: Nếu ID tin nhắn này đã từng xử lý, bỏ qua ngay!
+    if message.id in _processed_messages:
+        return
+    _processed_messages.append(message.id)
+
+    # 2. Xử lý lệnh của bot (nếu có)
     await bot.process_commands(message)
 
-    # 2. Bỏ qua các tin nhắn không nằm trong Server (DMs)
+    # 3. Bỏ qua các tin nhắn không nằm trong Server (DMs)
     if message.guild is None:
         return
         
-    # 3. Chỉ xử lý trong kênh Text hoặc Thread
+    # 4. Chỉ xử lý trong kênh Text hoặc Thread
     if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
         return
 
-    # 4. Bỏ qua nếu tin nhắn đến từ chính Webhook dịch thuật của bot này
-    if message.webhook_id is not None and message.webhook_id in _own_webhook_ids:
+    # 5. CHẶN TUYỆT ĐỐI TẤT CẢ WEBHOOKS: Tránh hoàn toàn việc bot tự dịch lại tin nhắn của chính nó
+    if message.webhook_id is not None:
         return
 
-    # 5. CHỈ dịch tin nhắn của các BOT khác (bỏ qua hoàn toàn người dùng thật)
+    # 6. CHỈ dịch tin nhắn của các BOT khác (bỏ qua hoàn toàn người dùng thật)
     if not message.author.bot:
         return
 
-    # 6. Kiểm tra xem kênh này có đang kích hoạt dịch hay không
+    # 7. Kiểm tra xem kênh này có đang kích hoạt dịch hay không
     if not is_channel_translation_active(message.channel.id):
         return
 
-    # 7. Bỏ qua các tin nhắn bắt đầu bằng ký tự lệnh ($k, !toggledich, v.v.)
+    # 8. Bỏ qua các tin nhắn bắt đầu bằng ký tự lệnh
     if is_command_message(message.content):
         return
 
@@ -459,7 +440,7 @@ async def on_message(message: discord.Message):
         if changed:
             embeds_changed = True
 
-    # --- BỘ LỌC CHỐNG NHÂN ĐÔI EMBED ---
+    # --- BỘ LỌC CHỐNG NHÂN ĐÔI EMBED BÊN TRONG CÙNG 1 TIN NHẮN ---
     unique_embeds: list[discord.Embed] = []
     seen_embeds = set()
     for emb in new_embeds:
@@ -469,7 +450,6 @@ async def on_message(message: discord.Message):
             seen_embeds.add(e_str)
             unique_embeds.append(emb)
     new_embeds = unique_embeds
-    # ----------------------------------
 
     if not content_changed and not embeds_changed:
         return  
@@ -488,24 +468,19 @@ async def on_message(message: discord.Message):
             except (discord.HTTPException, discord.NotFound) as e:
                 log.warning(f"Không tải lại được file đính kèm: {e}")
 
-        if has_components:
-            kwargs = dict(username=display_name, avatar_url=avatar_url)
-            if final_content:
-                kwargs["content"] = final_content
-            if new_embeds:
-                kwargs["embeds"] = new_embeds
+        kwargs = dict(username=display_name, avatar_url=avatar_url)
+        if final_content:
+            kwargs["content"] = final_content
+        if new_embeds:
+            kwargs["embeds"] = new_embeds
 
+        if has_components:
             if isinstance(message.channel, discord.Thread):
                 await webhook.send(thread=message.channel, **kwargs)
             else:
                 await webhook.send(**kwargs)
             return
 
-        kwargs = dict(username=display_name, avatar_url=avatar_url)
-        if final_content:
-            kwargs["content"] = final_content
-        if new_embeds:
-            kwargs["embeds"] = new_embeds
         if files:
             kwargs["files"] = files
 
@@ -515,14 +490,13 @@ async def on_message(message: discord.Message):
             await webhook.send(**kwargs)
 
         try:
-            # Thêm độ trễ cực nhỏ để đảm bảo không xung đột tiến trình Discord
             await asyncio.sleep(0.5)
             await message.delete()
         except discord.NotFound:
             pass
 
     except discord.Forbidden:
-        log.error("Thiếu quyền! Cần cấp Manage Messages + Manage Webhooks cho bot trong kênh này.")
+        log.error("Thiếu quyền! Cần cấp Manage Messages + Manage Webhooks cho bot.")
     except discord.HTTPException as e:
         log.error(f"Lỗi Discord API: {e}")
 
