@@ -411,7 +411,7 @@ async def toggle_dich(ctx: commands.Context):
 async def on_ready():
     log.info(f"Đã đăng nhập: {bot.user} (ID: {bot.user.id})")
     
-    # [MỚI] QUÉT TOÀN BỘ WEBHOOK KHI KHỞI ĐỘNG: Tránh tuyệt đối việc phản hồi vòng lặp hoặc dịch nhầm chính mình
+    # QUÉT TOÀN BỘ WEBHOOK KHI KHỞI ĐỘNG: Tránh tuyệt đối việc phản hồi vòng lặp hoặc dịch nhầm chính mình
     log.info("Đang quét và đồng bộ danh sách Webhook của bot...")
     count = 0
     for guild in bot.guilds:
@@ -518,4 +518,4 @@ async def on_message(message: discord.Message):
         kwargs = dict(username=display_name, avatar_url=avatar_url)
         if final_content:
             kwargs["content"] = final_content
-        i
+        if new_
