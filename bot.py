@@ -1,9 +1,10 @@
-""
+"""
 Discord Auto-Translate Bot (Anh -> Việt, dịch mọi thứ dịch được từ BOT khác)
 ------------------------------------------------------------------------------
 - Dịch TẤT CẢ nội dung tiếng Anh dịch được từ BOT KHÁC (vd. Mudae) sang tiếng Việt
 - Giữ nguyên tên bot gốc, avatar gốc, hình ảnh, file đính kèm, màu sắc embed.
 - Tích hợp lệnh !toggledich để bật/tắt nhanh cơ chế dịch tại kênh bất kỳ.
+- Dịch không dấu vết, thế chỗ tin nhắn gốc mượt mà.
 """
 
 import os
@@ -27,7 +28,6 @@ DEFAULT_CHANNELS = {int(x) for x in CHANNEL_IDS_RAW.split(",") if x.strip()} if 
 TRANSLATE_ALL_BY_DEFAULT = len(DEFAULT_CHANNELS) == 0
 
 # Biến toàn cục để theo dõi trạng thái bật/tắt động trong lúc bot chạy
-# (Người dùng gõ lệnh !toggledich sẽ trực tiếp thay đổi trạng thái trong này)
 ACTIVE_CHANNELS = DEFAULT_CHANNELS.copy()
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
@@ -50,6 +50,7 @@ COMMAND_TOKEN_PATTERN = re.compile(r"\$\w+")
 
 # Từ điển thuật ngữ tối ưu cho game Gacha/Anime
 GLOSSARY: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"\bwish\s*list\s*rolls?\b", re.IGNORECASE), "lượt roll wishlist"),
     (re.compile(r"\bcharacters?\b", re.IGNORECASE), "nhân vật"),
     (re.compile(r"\brolls?\b", re.IGNORECASE), "roll"),
     (re.compile(r"\brolled\b", re.IGNORECASE), "roll"),
@@ -82,7 +83,8 @@ def _bold_emoji_name(name: str, text: str, start: int) -> str:
     prefix = " " if start > 0 and text[start - 1] not in (" ", "\n") else ""
     return f"{prefix}**{_format_emoji_label(name)}**"
 
-_DEDUP_EMOJI_LABEL_PATTERN = re.compile(r"\*\*([^*\n]{2,40})\*\*(\s+)\1\b", re.IGNORECASE)
+# Đã vá lỗi lặp chữ in đậm (ví dụ: **Đồng III** **Đồng III**)
+_DEDUP_EMOJI_LABEL_PATTERN = re.compile(r"\*\*([^*\n]{2,40})\*\*(\s+)(?:\*\*)?\1(?:\*\*)?(?!\w)", re.IGNORECASE)
 
 def _stylize_broken_emoji(text: str) -> str:
     if not text:
@@ -104,12 +106,9 @@ VIETNAMESE_CHARS = re.compile(
 )
 
 def is_channel_translation_active(channel_id: int) -> bool:
-    """Kiểm tra xem kênh hiện tại có được phép chạy dịch tự động hay không."""
     if TRANSLATE_ALL_BY_DEFAULT:
-        # Mặc định dịch tất cả kênh, trừ những kênh bị tắt (nằm trong ACTIVE_CHANNELS dưới dạng black-list)
         return channel_id not in ACTIVE_CHANNELS
     else:
-        # Chỉ dịch những kênh nằm trong ACTIVE_CHANNELS (white-list)
         return channel_id in ACTIVE_CHANNELS
 
 def is_command_message(content: str) -> bool:
@@ -353,7 +352,6 @@ async def toggle_dich(ctx: commands.Context):
     channel_id = ctx.channel.id
     
     if TRANSLATE_ALL_BY_DEFAULT:
-        # Nếu mặc định là dịch tất cả, ACTIVE_CHANNELS hoạt động như một Blacklist (danh sách tắt)
         if channel_id in ACTIVE_CHANNELS:
             ACTIVE_CHANNELS.remove(channel_id)
             status = "🟢 **BẬT**"
@@ -361,7 +359,6 @@ async def toggle_dich(ctx: commands.Context):
             ACTIVE_CHANNELS.add(channel_id)
             status = "🔴 **TẮT**"
     else:
-        # Nếu mặc định chỉ dịch kênh chỉ định, ACTIVE_CHANNELS hoạt động như một Whitelist (danh sách bật)
         if channel_id in ACTIVE_CHANNELS:
             ACTIVE_CHANNELS.remove(channel_id)
             status = "🔴 **TẮT**"
@@ -385,26 +382,20 @@ async def on_message(message: discord.Message):
     if not isinstance(message.channel, (discord.TextChannel, discord.Thread)):
         return
 
-    # Luôn ưu tiên xử lý các lệnh từ người dùng (như !toggledich) trước tiên
     await bot.process_commands(message)
 
-    # Chống vòng lặp: bỏ qua tin nhắn do chính các webhook của bot này tạo ra
     if message.webhook_id is not None and message.webhook_id in _own_webhook_ids:
         return
 
-    # YÊU CẦU: Chỉ dịch bot khác. Bỏ qua hoàn toàn tin nhắn từ người dùng thực.
     if not message.author.bot:
         return
 
-    # YÊU CẦU: Có thể tạm dừng dịch ở kênh hiện tại thông qua lệnh toggle
     if not is_channel_translation_active(message.channel.id):
         return
 
-    # Giữ nguyên tuyệt đối các tin nhắn lệnh (vd. $mn, !help, .roll) của các bot khác
     if is_command_message(message.content):
         return
 
-    # YÊU CẦU: Dịch tự động và dịch toàn bộ nội dung từ ngắn đến dài của Bot khác
     final_content = message.content
     content_changed = False
     if message.content and message.content.strip():
@@ -418,7 +409,6 @@ async def on_message(message: discord.Message):
         if changed:
             embeds_changed = True
 
-    # Không có bất kỳ thay đổi nào để dịch -> giữ nguyên trạng, không đụng vào
     if not content_changed and not embeds_changed:
         return  
 
@@ -436,9 +426,6 @@ async def on_message(message: discord.Message):
             except (discord.HTTPException, discord.NotFound) as e:
                 log.warning(f"Không tải lại được file đính kèm: {e}")
 
-        # YÊU CẦU: Dịch cả nút (nhưng webhook bị giới hạn API không giữ tương tác được)
-        # -> Giải pháp tối ưu: Nếu có nút, giữ nguyên tin gốc để người dùng thao tác bấm. 
-        # Gửi thêm bản dịch sạch đè ngay dưới không có bất kỳ ký hiệu thừa nào.
         if has_components:
             kwargs = dict(username=display_name, avatar_url=avatar_url)
             if final_content:
@@ -452,7 +439,6 @@ async def on_message(message: discord.Message):
                 await webhook.send(**kwargs)
             return
 
-        # YÊU CẦU: Ghi bản dịch đè lên tin nhắn gốc & dịch không dấu vết (không hiện chú thích dịch)
         kwargs = dict(username=display_name, avatar_url=avatar_url)
         if final_content:
             kwargs["content"] = final_content
